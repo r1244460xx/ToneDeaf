@@ -1400,20 +1400,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       hudTimeDisplay.textContent = `${formatTime(curTime)} / ${formatTime(totalDur)}`;
 
       let activeNote = null;
+      let lastEndedNote = null;
       let nextUpcomingNote = null;
       let minNextGap = 9999;
+      let minPrevGap = 9999;
       const allNotes = currentData.data;
 
       for (let i = 0; i < allNotes.length; i++) {
         const n = allNotes[i];
-        if (curTime >= allNotes[i].start && curTime <= allNotes[i].end) {
-          activeNote = allNotes[i];
+        if (curTime >= n.start && curTime <= n.end) {
+          activeNote = n;
         }
         if (n.start > curTime && (n.start - curTime) < minNextGap) {
           minNextGap = n.start - curTime;
           nextUpcomingNote = n;
         }
+        if (n.end < curTime && (curTime - n.end) < minPrevGap) {
+          minPrevGap = curTime - n.end;
+          lastEndedNote = n;
+        }
       }
+
+      // 咬字輔音連音平滑：若處於兩個音符之間微小間隙（<= 180ms，清輔音咬字閉合），視為同一樂句連音，不閃爍「休止」
+      const isArticulating = (!activeNote && lastEndedNote && nextUpcomingNote && minPrevGap <= 0.18 && minNextGap <= 0.18);
 
       if (activeNote) {
         const jianpu = midiToJianpuInfo(activeNote.midi, keyOffset);
@@ -1425,10 +1434,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         hudNoteName.textContent = activeNote.pitch;
         hudNoteMeta.textContent = `時長 ${activeNote.duration}s | MIDI ${activeNote.midi}`;
         document.getElementById("hudPitchBadge").style.borderColor = "#fbbf24";
+      } else if (isArticulating && lastEndedNote) {
+        const jianpu = midiToJianpuInfo(lastEndedNote.midi, keyOffset);
+        let jianpuSymbol = jianpu.number + (jianpu.acc || "");
+        if (jianpu.dotsTop > 0) jianpuSymbol = "•" + jianpuSymbol;
+        if (jianpu.dotsBottom > 0) jianpuSymbol = jianpuSymbol + "•";
+
+        hudJianpu.textContent = jianpuSymbol;
+        hudNoteName.textContent = lastEndedNote.pitch;
+        hudNoteMeta.textContent = `咬字連音過渡中 (~${(minNextGap * 1000).toFixed(0)}ms)`;
+        document.getElementById("hudPitchBadge").style.borderColor = "#fbbf24";
       } else {
         hudJianpu.textContent = "-";
-        hudNoteName.textContent = "休止 / 呼吸";
-        hudNoteMeta.textContent = nextUpcomingNote ? `距離下個音符【${nextUpcomingNote.pitch}】還有 ${minNextGap.toFixed(1)}s` : "目前無演唱音符";
+        if (nextUpcomingNote && minNextGap <= 2.5) {
+          hudNoteName.textContent = "即將開唱 (準備)";
+          hudNoteMeta.textContent = `距離下個音符【${nextUpcomingNote.pitch}】還有 ${minNextGap.toFixed(1)}s`;
+        } else {
+          hudNoteName.textContent = "☕ 樂句休止中";
+          hudNoteMeta.textContent = nextUpcomingNote ? `距下句歌唱還有 ${minNextGap.toFixed(1)}s` : "目前無演唱音符";
+        }
         document.getElementById("hudPitchBadge").style.borderColor = "rgba(56, 189, 248, 0.25)";
       }
 
@@ -1502,33 +1526,65 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         // 3. 【防殘影核心神器】判定線靶心靜止標靶 (Stationary Target HUD)
         // 眼睛只要注視此處，完全不用追著移動音符看，100% 告別殘影！
-        if (activeNote || nextUpcomingNote) {
-          const targetNote = activeNote || nextUpcomingNote;
-          const tJianpu = midiToJianpuInfo(targetNote.midi, keyOffset);
+        // 嚴格落實：發聲時精準顯示音高；休止/間奏時絕不殘留假音高
+        let hudText = "";
+        let hudIsActive = false;
+        let hudIsUpcoming = false;
+
+        if (activeNote) {
+          const tJianpu = midiToJianpuInfo(activeNote.midi, keyOffset);
           let tLabel = tJianpu.number + (tJianpu.acc || "");
           if (tJianpu.dotsTop > 0) tLabel = "•" + tLabel;
           if (tJianpu.dotsBottom > 0) tLabel = tLabel + "•";
+          hudText = `🎯 當前音高：【 ${tLabel} ${activeNote.pitch} 】`;
+          hudIsActive = true;
+        } else if (isArticulating && lastEndedNote) {
+          const tJianpu = midiToJianpuInfo(lastEndedNote.midi, keyOffset);
+          let tLabel = tJianpu.number + (tJianpu.acc || "");
+          if (tJianpu.dotsTop > 0) tLabel = "•" + tLabel;
+          if (tJianpu.dotsBottom > 0) tLabel = tLabel + "•";
+          hudText = `🎯 咬字連音：【 ${tLabel} ${lastEndedNote.pitch} 】`;
+          hudIsActive = true;
+        } else if (nextUpcomingNote && minNextGap <= 2.5) {
+          const tJianpu = midiToJianpuInfo(nextUpcomingNote.midi, keyOffset);
+          let tLabel = tJianpu.number + (tJianpu.acc || "");
+          if (tJianpu.dotsTop > 0) tLabel = "•" + tLabel;
+          if (tJianpu.dotsBottom > 0) tLabel = tLabel + "•";
+          hudText = `⏳ 準備進歌：【 ${tLabel} ${nextUpcomingNote.pitch} 】 (${minNextGap.toFixed(1)}s)`;
+          hudIsUpcoming = true;
+        } else {
+          // 純休止或間奏中：明確標註休止，絕不顯示假音高！
+          hudText = nextUpcomingNote ? `☕ 樂句休止中 (距下句 ${minNextGap.toFixed(1)}s)` : `☕ 樂句休止中`;
+        }
 
-          const hudText = activeNote 
-            ? `🎯 當前音高：【 ${tLabel} ${targetNote.pitch} 】` 
-            : `⏳ 即將開唱：【 ${tLabel} ${targetNote.pitch} 】 (${minNextGap.toFixed(1)}s)`;
-
+        if (hudText) {
           rollCtx.save();
           rollCtx.font = "bold 13px system-ui, sans-serif";
           const tw = rollCtx.measureText(hudText).width;
           const hX = Math.max(pianoKeyWidth + 8, playheadX - tw / 2);
           const hY = 8;
 
-          // 靜止底框
-          rollCtx.fillStyle = activeNote ? "rgba(251, 191, 36, 0.25)" : "rgba(14, 21, 38, 0.9)";
-          rollCtx.strokeStyle = activeNote ? "#fbbf24" : "#38bdf8";
+          // 靜止底框樣式自適應
+          if (hudIsActive) {
+            rollCtx.fillStyle = "rgba(251, 191, 36, 0.22)";
+            rollCtx.strokeStyle = "#fbbf24";
+          } else if (hudIsUpcoming) {
+            rollCtx.fillStyle = "rgba(14, 21, 38, 0.9)";
+            rollCtx.strokeStyle = "#38bdf8";
+          } else {
+            rollCtx.fillStyle = "rgba(15, 23, 42, 0.85)";
+            rollCtx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+          }
           rollCtx.lineWidth = 1.5;
           rollCtx.beginPath();
           rollCtx.roundRect(hX - 8, hY, tw + 16, 26, 6);
           rollCtx.fill();
           rollCtx.stroke();
 
-          rollCtx.fillStyle = activeNote ? "#fbbf24" : "#ffffff";
+          if (hudIsActive) rollCtx.fillStyle = "#fbbf24";
+          else if (hudIsUpcoming) rollCtx.fillStyle = "#38bdf8";
+          else rollCtx.fillStyle = "#94a3b8";
+
           rollCtx.textAlign = "left";
           rollCtx.textBaseline = "middle";
           rollCtx.fillText(hudText, hX, hY + 13);

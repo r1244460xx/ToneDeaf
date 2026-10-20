@@ -47,9 +47,10 @@ def get_vocals_audio(input_audio_path: Path, output_dir: Path) -> Path:
     return expected_vocals
 
 def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh: float = 0.38, energy_db_thresh: float = -38.0):
-    """使用 TorchCREPE 提取真實音高，並結合 RMS 能量門檻做降噪、同音縫合與去碎片化"""
-    print("\n[步驟 1/2] 正在使用 TorchCREPE 提取高精度音高序列...")
+    """使用 TorchCREPE 提取高精度音高，結合自適應雙門檻 VAD、形態學子音閉合與施密特觸發器"""
+    print("\n[步驟 1/2] 正在使用 TorchCREPE 提取高精度音高序列 (結合雙門檻動態 VAD)...")
     import torchcrepe
+    from scipy.ndimage import binary_closing
 
     if torch.cuda.is_available():
         device = "cuda"
@@ -63,7 +64,7 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
     hop_length = int(sr / 100)  # 10ms
     hop_sec = hop_length / sr
 
-    fmin = 60
+    fmin = 65
     fmax = 1000
     model = "tiny"
 
@@ -105,14 +106,46 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
     rms = rms[:min_len]
     db = librosa.amplitude_to_db(rms, ref=np.max)
 
-    is_voiced = (periodicity_np > periodicity_thresh) & (db > energy_db_thresh)
+    # 動態底噪估算 (取非靜音底層 15% 分位數)
+    non_silent_db = db[db > -75]
+    noise_floor = float(np.percentile(non_silent_db, 15)) if len(non_silent_db) > 0 else -55.0
+    print(f"動態音訊底噪估算: {noise_floor:.1f} dB (自適應雙門檻 VAD 啟用)")
 
-    midi_series = np.zeros_like(pitch_np)
+    # 1. 雙門檻動態 VAD (Dual-Threshold Hysteresis VAD)：
+    # - 啟動門檻 (High Trigger)：要求能量高於底噪 + 10dB 且週期性 >= 0.38，杜絕休止與伴奏滲漏誤觸發
+    # - 維持門檻 (Low Sustain)：一旦發聲，容許能量下探至底噪 + 4dB (或 -55dB) 且週期性 >= 0.18，保護弱音與句尾
+    active_voiced = np.zeros(min_len, dtype=bool)
+    is_on = False
+
     for i in range(min_len):
-        if is_voiced[i] and pitch_np[i] > 0:
-            midi_series[i] = hz_to_midi(pitch_np[i])
+        d = db[i]
+        p = periodicity_np[i]
+        freq = pitch_np[i]
 
-    # 1. 中值濾波器 (Median Filter, window=7 / 70ms)：平滑微小擾動與生理顫音
+        if not is_on:
+            if d > max(noise_floor + 10.0, -48.0) and p >= 0.38 and freq >= 65:
+                is_on = True
+                active_voiced[i] = True
+        else:
+            if d > max(noise_floor + 4.0, -55.0) and (p >= 0.18 or d > -24.0) and freq >= 65:
+                active_voiced[i] = True
+            else:
+                is_on = False
+
+    # 2. 形態學子音閉合運算 (Morphological Closing, 120ms)：
+    # 歌手演唱時的清輔音（b, p, d, t, g, k, s 等）有 30~100ms 物理閉合，閉合縫合後絕不會在詞句中途閃現「休止」！
+    struct = np.ones(12, dtype=bool)  # 12 幀 = 120ms
+    is_voiced = binary_closing(active_voiced, structure=struct)
+
+    midi_series = np.zeros(min_len)
+    for i in range(min_len):
+        if is_voiced[i]:
+            if pitch_np[i] >= 65:
+                midi_series[i] = hz_to_midi(pitch_np[i])
+            elif i > 0 and midi_series[i - 1] > 0:
+                midi_series[i] = midi_series[i - 1]
+
+    # 3. 中值濾波器 (Median Filter, window=7 / 70ms)：平滑微小擾動與生理顫音
     midi_filtered = np.copy(midi_series)
     diff = np.diff(np.concatenate(([False], midi_series > 0, [False])).astype(int))
     voiced_starts = np.where(diff == 1)[0]
@@ -124,7 +157,7 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
             k = 7 if chunk_len >= 7 else 5
             midi_filtered[s:e] = scipy.signal.medfilt(midi_series[s:e], kernel_size=k)
 
-    # 2. 施密特觸發器機制 (Hysteresis / 滯後判定)：
+    # 4. 施密特觸發器機制 (Hysteresis / 滯後判定)：
     # 音高必須偏離原半音超過一定時間 (60ms 以上，即 6 幀) 且幅度顯著，才切換為新音符。
     raw_notes = []
     current_note = None
@@ -201,7 +234,7 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
             # 靜音幀
             silence_frames += 1
             pending_trans = None
-            if silence_frames >= 8:  # 80ms 靜音確認發音終止
+            if silence_frames >= 12:  # 120ms 靜音確認發音終止
                 if current_note is not None:
                     # 排除尾隨的靜音幀
                     note_end = current_note["end"]
@@ -229,30 +262,41 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
                 "pitch": midi_to_note_name(med_m)
             })
 
-    # 同音高自動縫合與微小雜音過濾
+    # 5. 同音高自動縫合與孤立雜訊剔除 (Stitching & Spurious Glitch Pruning)
     notes = []
     if raw_notes:
         merged_note = dict(raw_notes[0])
         for next_note in raw_notes[1:]:
             gap = next_note["start"] - merged_note["end"]
-            if next_note["midi"] == merged_note["midi"] and gap <= 0.12:
+            if next_note["midi"] == merged_note["midi"] and gap <= 0.14:
                 merged_note["end"] = next_note["end"]
                 merged_note["duration"] = round(merged_note["end"] - merged_note["start"], 3)
             else:
-                if merged_note["duration"] >= 0.08:
+                if merged_note["duration"] >= 0.09:
                     notes.append(merged_note)
                 merged_note = dict(next_note)
 
-        if merged_note["duration"] >= 0.08:
+        if merged_note["duration"] >= 0.09:
             notes.append(merged_note)
 
-    for idx, n in enumerate(notes):
+    # 剃除前後均為大休止 (>0.35s) 的孤立極短碎音 (<0.12s，典型為伴奏敲擊或吸氣雜音)
+    cleaned_notes = []
+    for i in range(len(notes)):
+        n = notes[i]
+        gap_before = (n["start"] - notes[i - 1]["end"]) if i > 0 else 999.0
+        gap_after = (notes[i + 1]["start"] - n["end"]) if i < len(notes) - 1 else 999.0
+        if n["duration"] < 0.12 and gap_before >= 0.35 and gap_after >= 0.35:
+            # 孤立突波，剃除！
+            continue
+        cleaned_notes.append(n)
+
+    for idx, n in enumerate(cleaned_notes):
         n["id"] = idx + 1
 
-    print(f"👉 成功提取出 {len(notes)} 個物理發音音符（經中值濾波與施密特觸發器去抖動）。")
-    return notes
+    print(f"👉 成功提取出 {len(cleaned_notes)} 個物理發音音符（已啟用自適應雙門檻 VAD 與子音形態縫合）。")
+    return cleaned_notes
 
-def segment_phrases_by_pause(notes: list, phrase_gap_threshold: float = 0.38):
+def segment_phrases_by_pause(notes: list, phrase_gap_threshold: float = 0.60):
     """依據聲音物理換氣停頓 (gap >= threshold) 自動將音符切分為歌唱樂句（分行）"""
     print(f"\n[步驟 2/2] 正在依據聲音物理呼吸停頓 (Gap >= {phrase_gap_threshold}s) 自動切分樂句分行...")
     if not notes:
