@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import soundfile as sf
 import librosa
+import scipy.signal
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -111,54 +112,122 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
         if is_voiced[i] and pitch_np[i] > 0:
             midi_series[i] = hz_to_midi(pitch_np[i])
 
+    # 1. 中值濾波器 (Median Filter, window=7 / 70ms)：平滑微小擾動與生理顫音
+    midi_filtered = np.copy(midi_series)
+    diff = np.diff(np.concatenate(([False], midi_series > 0, [False])).astype(int))
+    voiced_starts = np.where(diff == 1)[0]
+    voiced_ends = np.where(diff == -1)[0]
+
+    for s, e in zip(voiced_starts, voiced_ends):
+        chunk_len = e - s
+        if chunk_len >= 5:
+            k = 7 if chunk_len >= 7 else 5
+            midi_filtered[s:e] = scipy.signal.medfilt(midi_series[s:e], kernel_size=k)
+
+    # 2. 施密特觸發器機制 (Hysteresis / 滯後判定)：
+    # 音高必須偏離原半音超過一定時間 (60ms 以上，即 6 幀) 且幅度顯著，才切換為新音符。
     raw_notes = []
     current_note = None
+    pending_trans = None
+    silence_frames = 0
+    min_trans_frames = 6  # 60ms 判定門檻
 
-    for i in range(len(midi_series)):
+    for i in range(min_len):
         t_now = i * hop_sec
-        m_val = midi_series[i]
+        m_val = midi_filtered[i]
 
         if m_val > 0:
-            rounded_midi = int(round(m_val))
+            silence_frames = 0
+            cand_round = int(round(m_val))
+
             if current_note is None:
                 current_note = {
                     "start": t_now,
                     "end": t_now + hop_sec,
-                    "midi_samples": [m_val],
-                    "target_midi": rounded_midi
+                    "target_midi": cand_round,
+                    "midi_samples": [m_val]
                 }
+                pending_trans = None
             else:
-                if abs(rounded_midi - current_note["target_midi"]) <= 1:
+                diff_from_target = abs(m_val - current_note["target_midi"])
+                if diff_from_target <= 0.58:
+                    # 在原音高容許範圍內 (含正常微抖動)，維持當前音符
                     current_note["end"] = t_now + hop_sec
                     current_note["midi_samples"].append(m_val)
+                    pending_trans = None
                 else:
-                    median_midi = int(round(np.median(current_note["midi_samples"])))
-                    dur = current_note["end"] - current_note["start"]
-                    raw_notes.append({
-                        "start": round(current_note["start"], 3),
-                        "end": round(current_note["end"], 3),
-                        "duration": round(dur, 3),
-                        "midi": median_midi,
-                        "pitch": midi_to_note_name(median_midi)
-                    })
-                    current_note = {
-                        "start": t_now,
-                        "end": t_now + hop_sec,
-                        "midi_samples": [m_val],
-                        "target_midi": rounded_midi
-                    }
+                    # 偏離原音高，進入施密特滯後觀察
+                    if pending_trans is None:
+                        pending_trans = {
+                            "cand_midi": cand_round,
+                            "start_time": t_now,
+                            "samples": [m_val],
+                            "count": 1
+                        }
+                    else:
+                        if abs(m_val - pending_trans["cand_midi"]) <= 0.50:
+                            pending_trans["count"] += 1
+                            pending_trans["samples"].append(m_val)
+                        else:
+                            pending_trans = {
+                                "cand_midi": cand_round,
+                                "start_time": t_now,
+                                "samples": [m_val],
+                                "count": 1
+                            }
+
+                    # 當偏離新音高持續達 60ms (6 幀) 時，確認觸發換音！
+                    if pending_trans["count"] >= min_trans_frames:
+                        med_m = int(round(np.median(current_note["midi_samples"])))
+                        raw_notes.append({
+                            "start": round(current_note["start"], 3),
+                            "end": round(pending_trans["start_time"], 3),
+                            "duration": round(pending_trans["start_time"] - current_note["start"], 3),
+                            "midi": med_m,
+                            "pitch": midi_to_note_name(med_m)
+                        })
+                        current_note = {
+                            "start": pending_trans["start_time"],
+                            "end": t_now + hop_sec,
+                            "target_midi": pending_trans["cand_midi"],
+                            "midi_samples": pending_trans["samples"]
+                        }
+                        pending_trans = None
+                    else:
+                        # 尚未跨過滯後門檻時，先暫時延續當前音符，避免微小顫音直接碎音
+                        current_note["end"] = t_now + hop_sec
+                        current_note["midi_samples"].append(m_val)
         else:
-            if current_note is not None:
-                median_midi = int(round(np.median(current_note["midi_samples"])))
-                dur = current_note["end"] - current_note["start"]
-                raw_notes.append({
-                    "start": round(current_note["start"], 3),
-                    "end": round(current_note["end"], 3),
-                    "duration": round(dur, 3),
-                    "midi": median_midi,
-                    "pitch": midi_to_note_name(median_midi)
-                })
-                current_note = None
+            # 靜音幀
+            silence_frames += 1
+            pending_trans = None
+            if silence_frames >= 8:  # 80ms 靜音確認發音終止
+                if current_note is not None:
+                    # 排除尾隨的靜音幀
+                    note_end = current_note["end"]
+                    med_m = int(round(np.median(current_note["midi_samples"])))
+                    dur = note_end - current_note["start"]
+                    if dur >= 0.08:
+                        raw_notes.append({
+                            "start": round(current_note["start"], 3),
+                            "end": round(note_end, 3),
+                            "duration": round(dur, 3),
+                            "midi": med_m,
+                            "pitch": midi_to_note_name(med_m)
+                        })
+                    current_note = None
+
+    if current_note is not None:
+        med_m = int(round(np.median(current_note["midi_samples"])))
+        dur = current_note["end"] - current_note["start"]
+        if dur >= 0.08:
+            raw_notes.append({
+                "start": round(current_note["start"], 3),
+                "end": round(current_note["end"], 3),
+                "duration": round(dur, 3),
+                "midi": med_m,
+                "pitch": midi_to_note_name(med_m)
+            })
 
     # 同音高自動縫合與微小雜音過濾
     notes = []
@@ -166,21 +235,21 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
         merged_note = dict(raw_notes[0])
         for next_note in raw_notes[1:]:
             gap = next_note["start"] - merged_note["end"]
-            if next_note["midi"] == merged_note["midi"] and gap <= 0.15:
+            if next_note["midi"] == merged_note["midi"] and gap <= 0.12:
                 merged_note["end"] = next_note["end"]
                 merged_note["duration"] = round(merged_note["end"] - merged_note["start"], 3)
             else:
-                if merged_note["duration"] >= 0.10:
+                if merged_note["duration"] >= 0.08:
                     notes.append(merged_note)
                 merged_note = dict(next_note)
 
-        if merged_note["duration"] >= 0.10:
+        if merged_note["duration"] >= 0.08:
             notes.append(merged_note)
 
     for idx, n in enumerate(notes):
         n["id"] = idx + 1
 
-    print(f"👉 成功提取出 {len(notes)} 個物理發音音符。")
+    print(f"👉 成功提取出 {len(notes)} 個物理發音音符（經中值濾波與施密特觸發器去抖動）。")
     return notes
 
 def segment_phrases_by_pause(notes: list, phrase_gap_threshold: float = 0.38):

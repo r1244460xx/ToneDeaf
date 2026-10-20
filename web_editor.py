@@ -398,45 +398,98 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       flex-wrap: wrap;
     }
 
-    /* 暫存播放起點工具組 */
-    .saved-start-group {
+    /* A-B 循環練唱段落工具組 */
+    .loop-station-group {
       display: flex;
       align-items: center;
-      gap: 6px;
-      background: rgba(16, 24, 40, 0.75);
+      gap: 7px;
+      background: rgba(14, 21, 38, 0.85);
       border: 1px solid rgba(16, 185, 129, 0.45);
       padding: 3px 10px;
       border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      transition: all 0.2s ease;
+      flex-wrap: wrap;
     }
-    .saved-start-title {
-      font-size: 0.8rem;
-      font-weight: 700;
-      color: #6ee7b7;
+    .loop-station-group.loop-active {
+      border-color: #10b981;
+      background: rgba(6, 78, 59, 0.28);
+      box-shadow: 0 0 14px rgba(16, 185, 129, 0.35);
+    }
+    .loop-point-box {
       display: flex;
       align-items: center;
       gap: 4px;
+    }
+    .loop-tag {
+      font-size: 0.76rem;
+      font-weight: 800;
+      padding: 2px 6px;
+      border-radius: 4px;
       white-space: nowrap;
     }
-    .saved-start-input {
-      width: 65px;
+    .loop-tag-a {
+      background: rgba(16, 185, 129, 0.22);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.6);
+    }
+    .loop-tag-b {
+      background: rgba(245, 158, 11, 0.22);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.6);
+    }
+    .loop-input {
+      width: 58px;
       background: #080d1a;
-      border: 1px solid rgba(16, 185, 129, 0.5);
+      border: 1px solid rgba(56, 189, 248, 0.35);
       border-radius: 5px;
-      color: #6ee7b7;
+      color: #f8fafc;
       font-family: monospace;
       font-size: 0.85rem;
       font-weight: 800;
-      padding: 3px 6px;
+      padding: 3px 4px;
       text-align: center;
       outline: none;
     }
-    .saved-start-input:focus {
-      border-color: #34d399;
-      box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+    .loop-input:focus {
+      border-color: #38bdf8;
+      box-shadow: 0 0 6px rgba(56, 189, 248, 0.5);
     }
-    .saved-start-unit {
-      font-size: 0.75rem;
-      color: var(--text-muted);
+    .loop-toggle-label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.8rem;
+      font-weight: 800;
+      color: #94a3b8;
+      cursor: pointer;
+      user-select: none;
+      padding: 3px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(15, 23, 42, 0.6);
+      transition: all 0.15s;
+    }
+    .loop-toggle-label:hover {
+      color: #ffffff;
+      border-color: rgba(56, 189, 248, 0.5);
+    }
+    .loop-toggle-label.active {
+      color: #34d399;
+      background: rgba(16, 185, 129, 0.25);
+      border-color: #10b981;
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+    }
+    .scrub-loop-highlight {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      background: rgba(16, 185, 129, 0.35);
+      border-left: 2px solid #10b981;
+      border-right: 2px solid #f59e0b;
+      pointer-events: none;
+      display: none;
+      z-index: 1;
     }
     .btn-anchor {
       background: rgba(16, 185, 129, 0.18);
@@ -446,6 +499,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .btn-anchor:hover {
       background: rgba(16, 185, 129, 0.35);
       border-color: #34d399;
+      color: #ffffff;
+    }
+    .btn-b-point {
+      background: rgba(245, 158, 11, 0.18);
+      border-color: rgba(245, 158, 11, 0.5);
+      color: #fbbf24;
+    }
+    .btn-b-point:hover {
+      background: rgba(245, 158, 11, 0.35);
+      border-color: #f59e0b;
       color: #ffffff;
     }
     .btn-reset {
@@ -460,10 +523,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     .drag-tip-badge {
-      font-size: 0.76rem;
+      font-size: 0.75rem;
       color: #94a3b8;
       background: rgba(30, 41, 59, 0.5);
-      padding: 4px 10px;
+      padding: 4px 8px;
       border-radius: 6px;
       border: 1px solid rgba(51, 65, 85, 0.4);
       white-space: nowrap;
@@ -624,6 +687,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="toolbar-center">
         <span class="scrub-time-label" id="scrubCurTime">00:00.0</span>
         <div class="scrub-track-wrapper" id="scrubTrackWrapper" title="點擊或拖曳時間軸進度，放開立即繼續播放">
+          <div class="scrub-loop-highlight" id="scrubLoopHighlight"></div>
           <div class="scrub-progress-fill" id="scrubProgressFill"></div>
           <div class="scrub-handle" id="scrubHandle"></div>
         </div>
@@ -631,17 +695,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="toolbar-right">
-        <!-- 暫存播放起點工具組 -->
-        <div class="saved-start-group" id="savedStartGroup" title="設定練習或播放起點秒數，不影響左右拖曳拉時間">
-          <span class="saved-start-title">📌 播放起點：</span>
-          <input type="number" id="savedStartInput" min="0" step="0.1" value="0.0" onchange="setSavedStartManual(this.value)" class="saved-start-input" title="輸入指定秒數作為播放起點" />
-          <span class="saved-start-unit">秒</span>
-          <button class="btn-action btn-anchor" onclick="setSavedStartFromCurrent()" title="將目前播放秒數記為起點">📌 記住當前</button>
-          <button class="btn-action" onclick="jumpToSavedStart()" title="跳轉至暫存起點">⏮ 跳至起點</button>
-          <button class="btn-action btn-reset" onclick="resetSavedStart()" title="重置設回 0 秒">🔄 設回 0 秒</button>
+        <!-- A-B 區間循環練唱工具組 -->
+        <div class="loop-station-group" id="loopStationGroup" title="A-B 區間循環練唱：設定 A 點與 B 點反覆練習">
+          <!-- A 點 (起點) -->
+          <div class="loop-point-box">
+            <span class="loop-tag loop-tag-a">📍 A 點</span>
+            <input type="number" id="loopAInput" min="0" step="0.1" value="0.0" onchange="setLoopAManual(this.value)" class="loop-input" title="A 點（循環起點）秒數，可按鍵盤 [ 設為當前" />
+            <span style="font-size:0.75rem; color:var(--text-muted);">s</span>
+            <button class="btn-action btn-anchor" onclick="setLoopAFromCurrent()" title="將目前播放時間記為 A 點（快捷鍵 [）">📍 記 A</button>
+          </div>
+
+          <!-- B 點 (終點) -->
+          <div class="loop-point-box">
+            <span class="loop-tag loop-tag-b">🏁 B 點</span>
+            <input type="number" id="loopBInput" min="0" step="0.1" value="0.0" onchange="setLoopBManual(this.value)" class="loop-input" title="B 點（循環終點）秒數，可按鍵盤 ] 設為當前" />
+            <span style="font-size:0.75rem; color:var(--text-muted);">s</span>
+            <button class="btn-action btn-b-point" onclick="setLoopBFromCurrent()" title="將目前播放時間記為 B 點（快捷鍵 ]）">🏁 記 B</button>
+          </div>
+
+          <!-- 循環開關 -->
+          <label class="loop-toggle-label" id="loopToggleLabel" title="勾選開啟 A-B 區間循環播放（快捷鍵 L）">
+            <input type="checkbox" id="loopEnableCheckbox" onchange="toggleLoop(this.checked)" style="accent-color:#10b981; cursor:pointer;" />
+            <span>🔁 循環</span>
+          </label>
+
+          <!-- 快速跳轉與清除 -->
+          <button class="btn-action" onclick="jumpToLoopA()" title="跳轉至 A 點播放（快捷鍵 R）">⏮ 跳至 A</button>
+          <button class="btn-action btn-reset" onclick="clearLoopAB()" title="重置清除 A-B 循環設定">🔄 清除</button>
         </div>
 
-        <span class="drag-tip-badge">🖱️ 捲軸拖曳：往左拉快轉 ⏩ / 往右拉倒帶 ⏪（放開繼續播放）</span>
+        <span class="drag-tip-badge">🖱️ 拖曳：往左快轉 ⏩ / 往右倒帶 ⏪ | 快捷鍵：[ 設 A / ] 設 B / L 循環</span>
       </div>
     </div>
 
@@ -711,7 +794,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- 底部資訊提示 -->
     <div style="font-size:0.82rem; color:var(--text-muted); text-align:center; padding: 6px 0;">
-      💡 提示：按 <b>空白鍵 (Space)</b> 播放/暫停；<b>← / →</b> 快轉倒帶；直接在上方<b>鋼琴捲軸</b>或<b>時間軸進度條</b>按住滑鼠拖曳，放開自動繼續播放！
+      💡 提示：按 <b>空白鍵 (Space)</b> 播放/暫停；<b>← / →</b> 快轉倒帶；<b>[ / ]</b> 標記 A/B 點；<b>L</b> 切換循環；<b>R</b> 跳回 A 點！直接在<b>鋼琴捲軸</b>或<b>時間軸</b>拖曳，放開即繼續播放！
     </div>
   </main>
 
@@ -839,50 +922,150 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
     }
 
-    let savedStartTime = 0.0;
+    // ==========================================
+    // A-B 區間循環練唱核心狀態管理
+    // ==========================================
+    let loopA = 0.0;
+    let loopB = 0.0;
+    let isLoopActive = false;
+
     try {
-      const sStart = localStorage.getItem("tonedeaf_saved_start");
-      if (sStart !== null) savedStartTime = parseFloat(sStart) || 0.0;
+      const sA = localStorage.getItem("tonedeaf_loop_a");
+      if (sA !== null) loopA = parseFloat(sA) || 0.0;
+      const sB = localStorage.getItem("tonedeaf_loop_b");
+      if (sB !== null) loopB = parseFloat(sB) || 0.0;
+      const sAct = localStorage.getItem("tonedeaf_loop_active");
+      if (sAct !== null) isLoopActive = (sAct === "true");
     } catch (e) {}
 
-    function updateSavedStartUI() {
-      const input = document.getElementById("savedStartInput");
-      if (input) input.value = savedStartTime.toFixed(1);
-    }
-    setTimeout(updateSavedStartUI, 100);
+    function updateLoopUI() {
+      const inputA = document.getElementById("loopAInput");
+      const inputB = document.getElementById("loopBInput");
+      const chk = document.getElementById("loopEnableCheckbox");
+      const grp = document.getElementById("loopStationGroup");
+      const lbl = document.getElementById("loopToggleLabel");
 
-    function setSavedStartFromCurrent() {
-      savedStartTime = Math.round(audio.currentTime * 10) / 10;
-      updateSavedStartUI();
-      try { localStorage.setItem("tonedeaf_saved_start", savedStartTime.toString()); } catch (e) {}
-      showToast(`已設定播放起點為 ${savedStartTime.toFixed(1)}s (${formatTime(savedStartTime)})`);
+      if (inputA) inputA.value = loopA.toFixed(1);
+      if (inputB) inputB.value = loopB.toFixed(1);
+      if (chk) chk.checked = isLoopActive;
+      if (grp) grp.classList.toggle("loop-active", isLoopActive);
+      if (lbl) lbl.classList.toggle("active", isLoopActive);
+
+      updateScrubLoopRegion();
+    }
+    setTimeout(updateLoopUI, 100);
+
+    function saveLoopState() {
+      try {
+        localStorage.setItem("tonedeaf_loop_a", loopA.toString());
+        localStorage.setItem("tonedeaf_loop_b", loopB.toString());
+        localStorage.setItem("tonedeaf_loop_active", isLoopActive.toString());
+      } catch (e) {}
     }
 
-    function setSavedStartManual(val) {
+    function setLoopAFromCurrent() {
+      loopA = Math.round(audio.currentTime * 10) / 10;
+      if (loopB > 0 && loopB <= loopA) loopB = 0;
+      saveLoopState();
+      updateLoopUI();
+      showToast(`📍 已設定 A 點（起點）：${loopA.toFixed(1)}s (${formatTime(loopA)})`);
+    }
+
+    function setLoopAManual(val) {
       const v = parseFloat(val);
-      savedStartTime = isNaN(v) ? 0.0 : Math.max(0, Math.min(audio.duration || 9999, Math.round(v * 10) / 10));
-      updateSavedStartUI();
-      try { localStorage.setItem("tonedeaf_saved_start", savedStartTime.toString()); } catch (e) {}
-      showToast(`已設定播放起點為 ${savedStartTime.toFixed(1)}s (${formatTime(savedStartTime)})`);
+      loopA = isNaN(v) ? 0.0 : Math.max(0, Math.min(audio.duration || 9999, Math.round(v * 10) / 10));
+      if (loopB > 0 && loopB <= loopA) loopB = 0;
+      saveLoopState();
+      updateLoopUI();
+      showToast(`📍 已設定 A 點（起點）：${loopA.toFixed(1)}s (${formatTime(loopA)})`);
     }
 
-    function resetSavedStart() {
-      savedStartTime = 0.0;
-      updateSavedStartUI();
-      try { localStorage.removeItem("tonedeaf_saved_start"); } catch (e) {}
-      showToast("已重置播放起點設回 0 秒");
+    function setLoopBFromCurrent() {
+      const cur = Math.round(audio.currentTime * 10) / 10;
+      if (cur <= loopA) {
+        showToast("⚠️ B 點（終點）必須大於 A 點！請將時間軸拉到 A 點之後", true);
+        return;
+      }
+      loopB = cur;
+      isLoopActive = true;
+      saveLoopState();
+      updateLoopUI();
+      showToast(`🏁 已設定 B 點（終點）：${loopB.toFixed(1)}s (${formatTime(loopB)})，已啟動循環！`);
     }
 
-    function jumpToSavedStart() {
-      audio.currentTime = savedStartTime;
-      updateScrubSlider(savedStartTime, audio.duration);
-      showToast(`已跳轉至播放起點 ${formatTime(savedStartTime)}`);
+    function setLoopBManual(val) {
+      const v = parseFloat(val);
+      const targetB = isNaN(v) ? 0.0 : Math.max(0, Math.min(audio.duration || 9999, Math.round(v * 10) / 10));
+      if (targetB > 0 && targetB <= loopA) {
+        showToast("⚠️ B 點必須大於 A 點！", true);
+        return;
+      }
+      loopB = targetB;
+      saveLoopState();
+      updateLoopUI();
+      showToast(`🏁 已設定 B 點（終點）：${loopB.toFixed(1)}s (${formatTime(loopB)})`);
+    }
+
+    function toggleLoop(active) {
+      if (active && (!loopB || loopB <= loopA)) {
+        showToast("⚠️ 請先設定有效的 B 點（終點秒數）！", true);
+        const chk = document.getElementById("loopEnableCheckbox");
+        if (chk) chk.checked = false;
+        isLoopActive = false;
+        saveLoopState();
+        updateLoopUI();
+        return;
+      }
+      isLoopActive = active;
+      saveLoopState();
+      updateLoopUI();
+      showToast(isLoopActive ? `🔁 已啟用 A-B 區間循環 (${formatTime(loopA)} ~ ${formatTime(loopB)})` : "已關閉循環播放");
+    }
+
+    function jumpToLoopA() {
+      audio.currentTime = loopA;
+      updateScrubSlider(loopA, audio.duration);
+      if (audio.paused) {
+        audio.play();
+        playBtn.textContent = "⏸";
+      }
+      showToast(`⏮ 跳至 A 點 ${formatTime(loopA)} 繼續播放 ▶`);
+    }
+
+    function clearLoopAB() {
+      loopA = 0.0;
+      loopB = 0.0;
+      isLoopActive = false;
+      saveLoopState();
+      updateLoopUI();
+      showToast("🔄 已清除 A-B 循環設定");
+    }
+
+    function updateScrubLoopRegion() {
+      const highlight = document.getElementById("scrubLoopHighlight");
+      if (!highlight) return;
+      if (loopB > loopA && audio.duration) {
+        const leftPct = (loopA / audio.duration) * 100;
+        const widthPct = ((loopB - loopA) / audio.duration) * 100;
+        highlight.style.left = leftPct + "%";
+        highlight.style.width = widthPct + "%";
+        highlight.style.display = "block";
+        highlight.style.background = isLoopActive ? "rgba(16, 185, 129, 0.4)" : "rgba(148, 163, 184, 0.2)";
+        highlight.style.borderLeft = isLoopActive ? "2px solid #10b981" : "2px solid #94a3b8";
+        highlight.style.borderRight = isLoopActive ? "2px solid #f59e0b" : "2px solid #94a3b8";
+      } else {
+        highlight.style.display = "none";
+      }
     }
 
     function togglePlay() {
       if (audio.paused) {
-        if (audio.currentTime === 0 && savedStartTime > 0) {
-          audio.currentTime = savedStartTime;
+        if (isLoopActive && loopB > loopA) {
+          if (audio.currentTime < loopA || audio.currentTime >= loopB) {
+            audio.currentTime = loopA;
+          }
+        } else if (audio.currentTime === 0 && loopA > 0) {
+          audio.currentTime = loopA;
         }
         audio.play();
         playBtn.textContent = "⏸";
@@ -893,11 +1076,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function seekDelta(sec) {
-      if (sec === -30 && savedStartTime > 0) {
-        audio.currentTime = savedStartTime;
+      if (sec === -30 && loopA > 0) {
+        audio.currentTime = loopA;
       } else {
-        const minBound = (sec < 0 && savedStartTime > 0 && audio.currentTime >= savedStartTime) ? savedStartTime : 0;
-        audio.currentTime = Math.max(minBound, Math.min(audio.duration || 9999, audio.currentTime + sec));
+        const minBound = (sec < 0 && isLoopActive && loopA > 0 && audio.currentTime >= loopA) ? loopA : 0;
+        let newT = audio.currentTime + sec;
+        if (isLoopActive && loopB > loopA && newT >= loopB) {
+          newT = loopA;
+        }
+        audio.currentTime = Math.max(minBound, Math.min(audio.duration || 9999, newT));
       }
       updateScrubSlider(audio.currentTime, audio.duration);
     }
@@ -909,6 +1096,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     window.addEventListener("keydown", (e) => {
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+        return;
+      }
       if (e.code === "Space") {
         e.preventDefault();
         togglePlay();
@@ -918,6 +1108,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       } else if (e.code === "ArrowRight") {
         e.preventDefault();
         seekDelta(+3);
+      } else if (e.key === "[" || e.code === "BracketLeft") {
+        e.preventDefault();
+        setLoopAFromCurrent();
+      } else if (e.key === "]" || e.code === "BracketRight") {
+        e.preventDefault();
+        setLoopBFromCurrent();
+      } else if (e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        toggleLoop(!isLoopActive);
+      } else if (e.key.toLowerCase() === "r" || e.code === "Backspace") {
+        e.preventDefault();
+        jumpToLoopA();
       }
     });
 
@@ -1186,8 +1388,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const curTime = Math.max(0, audio.currentTime - syncOffsetSec);
       const totalDur = audio.duration || 1;
 
+      // A-B 區間循環判定：播放超過 B 點時，自動無縫跳回 A 點重播
+      if (isLoopActive && loopB > loopA + 0.1 && !audio.paused && !isSliderScrubbing && !isRollScrubbing) {
+        if (curTime >= loopB) {
+          audio.currentTime = loopA + syncOffsetSec;
+          showToast(`🔁 循環跳轉：回到 A 點 (${formatTime(loopA)})`);
+        }
+      }
+
       updateScrubSlider(curTime, totalDur);
-      hudTimeDisplay.textContent = `${formatTime(curTime)} / ${formatTime(totalDur)}`;
       hudTimeDisplay.textContent = `${formatTime(curTime)} / ${formatTime(totalDur)}`;
 
       let activeNote = null;
@@ -1420,36 +1629,99 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           rollCtx.restore();
         }
 
-        // 5. 繪製「📌 暫存播放起點」綠色虛線地標
-        if (savedStartTime > 0) {
-          const anchorX = playheadX + (savedStartTime - curTime) * pxPerSec;
-          if (anchorX >= pianoKeyWidth && anchorX <= stageWidth) {
+        // 5. 繪製「🔁 A-B 循環練唱區間」高亮光帶與 A/B 點地標
+        if (loopB > loopA) {
+          const xA = playheadX + (loopA - curTime) * pxPerSec;
+          const xB = playheadX + (loopB - curTime) * pxPerSec;
+          const clampXA = Math.max(pianoKeyWidth, xA);
+          const clampXB = Math.min(stageWidth, xB);
+
+          if (clampXB > clampXA) {
+            rollCtx.save();
+            rollCtx.fillStyle = isLoopActive ? "rgba(16, 185, 129, 0.08)" : "rgba(148, 163, 184, 0.04)";
+            rollCtx.fillRect(clampXA, 0, clampXB - clampXA, stageHeight);
+
+            // 頂部循環區域條
+            if (isLoopActive) {
+              rollCtx.fillStyle = "rgba(16, 185, 129, 0.4)";
+              rollCtx.fillRect(clampXA, 0, clampXB - clampXA, 4);
+
+              // 循環區間中央提示浮水印
+              if (clampXB - clampXA > 140) {
+                rollCtx.font = "bold 11px system-ui, sans-serif";
+                rollCtx.fillStyle = "rgba(16, 185, 129, 0.4)";
+                rollCtx.textAlign = "center";
+                rollCtx.fillText("🔁 A-B 循環練習區間", (clampXA + clampXB) / 2, 40);
+              }
+            }
+            rollCtx.restore();
+          }
+        }
+
+        // 繪製 A 點垂直地標線
+        if (loopA > 0) {
+          const xA = playheadX + (loopA - curTime) * pxPerSec;
+          if (xA >= pianoKeyWidth && xA <= stageWidth) {
             rollCtx.save();
             rollCtx.strokeStyle = "#10b981";
-            rollCtx.lineWidth = 1.8;
-            rollCtx.setLineDash([4, 4]);
+            rollCtx.lineWidth = 2.2;
+            rollCtx.setLineDash([5, 4]);
             rollCtx.beginPath();
-            rollCtx.moveTo(anchorX, 0);
-            rollCtx.lineTo(anchorX, stageHeight);
+            rollCtx.moveTo(xA, 0);
+            rollCtx.lineTo(xA, stageHeight);
             rollCtx.stroke();
             rollCtx.setLineDash([]);
 
-            // 底部起點旗標標籤
-            const anchorText = `📌 起點 ${formatTime(savedStartTime)}`;
+            // 底部 A 點旗標標籤
+            const textA = `📍 A 點 ${formatTime(loopA)}`;
             rollCtx.font = "bold 11px system-ui, sans-serif";
-            const atw = rollCtx.measureText(anchorText).width;
-            rollCtx.fillStyle = "rgba(6, 78, 59, 0.92)";
+            const twA = rollCtx.measureText(textA).width;
+            rollCtx.fillStyle = "rgba(6, 78, 59, 0.95)";
             rollCtx.strokeStyle = "#10b981";
             rollCtx.lineWidth = 1.2;
             rollCtx.beginPath();
-            rollCtx.roundRect(anchorX - atw / 2 - 6, stageHeight - 26, atw + 12, 20, 4);
+            rollCtx.roundRect(xA - twA / 2 - 6, stageHeight - 26, twA + 12, 20, 4);
             rollCtx.fill();
             rollCtx.stroke();
 
             rollCtx.fillStyle = "#6ee7b7";
             rollCtx.textAlign = "center";
             rollCtx.textBaseline = "middle";
-            rollCtx.fillText(anchorText, anchorX, stageHeight - 16);
+            rollCtx.fillText(textA, xA, stageHeight - 16);
+            rollCtx.restore();
+          }
+        }
+
+        // 繪製 B 點垂直地標線
+        if (loopB > 0) {
+          const xB = playheadX + (loopB - curTime) * pxPerSec;
+          if (xB >= pianoKeyWidth && xB <= stageWidth) {
+            rollCtx.save();
+            rollCtx.strokeStyle = "#f59e0b";
+            rollCtx.lineWidth = 2.2;
+            rollCtx.setLineDash([5, 4]);
+            rollCtx.beginPath();
+            rollCtx.moveTo(xB, 0);
+            rollCtx.lineTo(xB, stageHeight);
+            rollCtx.stroke();
+            rollCtx.setLineDash([]);
+
+            // 底部 B 點旗標標籤
+            const textB = `🏁 B 點 ${formatTime(loopB)}`;
+            rollCtx.font = "bold 11px system-ui, sans-serif";
+            const twB = rollCtx.measureText(textB).width;
+            rollCtx.fillStyle = "rgba(120, 53, 15, 0.95)";
+            rollCtx.strokeStyle = "#f59e0b";
+            rollCtx.lineWidth = 1.2;
+            rollCtx.beginPath();
+            rollCtx.roundRect(xB - twB / 2 - 6, stageHeight - 26, twB + 12, 20, 4);
+            rollCtx.fill();
+            rollCtx.stroke();
+
+            rollCtx.fillStyle = "#fbbf24";
+            rollCtx.textAlign = "center";
+            rollCtx.textBaseline = "middle";
+            rollCtx.fillText(textB, xB, stageHeight - 16);
             rollCtx.restore();
           }
         }
@@ -1541,6 +1813,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       minimapCtx.lineWidth = 1;
       minimapCtx.strokeRect(boxX, 0, boxW, mH);
 
+      // 繪製 A-B 循環區間在縮圖上的覆蓋標示
+      if (loopB > loopA) {
+        const loopStartM = loopA * mPxPerSec;
+        const loopEndM = loopB * mPxPerSec;
+        minimapCtx.fillStyle = isLoopActive ? "rgba(16, 185, 129, 0.35)" : "rgba(148, 163, 184, 0.2)";
+        minimapCtx.fillRect(loopStartM, 0, Math.max(3, loopEndM - loopStartM), mH);
+      }
+
       const curX = curTime * mPxPerSec;
       minimapCtx.fillStyle = "#fbbf24";
       minimapCtx.fillRect(curX - 1.5, 0, 3, mH);
@@ -1560,10 +1840,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     audio.addEventListener("play", () => { playBtn.textContent = "⏸"; });
     audio.addEventListener("pause", () => { playBtn.textContent = "▶"; });
     audio.addEventListener("ended", () => {
-      audio.currentTime = savedStartTime;
-      playBtn.textContent = "▶";
-      updateScrubSlider(savedStartTime, audio.duration);
-      showToast(`歌曲結束，已回到播放起點 ${formatTime(savedStartTime)}`);
+      if (isLoopActive && loopB > loopA) {
+        audio.currentTime = loopA;
+        audio.play();
+        playBtn.textContent = "⏸";
+        updateScrubSlider(loopA, audio.duration);
+        showToast(`🔁 循環：已回到 A 點 ${formatTime(loopA)} 繼續播放`);
+      } else {
+        audio.currentTime = loopA;
+        playBtn.textContent = "▶";
+        updateScrubSlider(loopA, audio.duration);
+        showToast(`歌曲結束，已回到起點 ${formatTime(loopA)}`);
+      }
     });
     audio.addEventListener("seeked", () => {
       updateScrubSlider(audio.currentTime, audio.duration);
