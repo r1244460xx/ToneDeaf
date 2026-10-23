@@ -294,7 +294,222 @@ def extract_notes_torchcrepe(audio_data: np.ndarray, sr: int, periodicity_thresh
         n["id"] = idx + 1
 
     print(f"👉 成功提取出 {len(cleaned_notes)} 個物理發音音符（已啟用自適應雙門檻 VAD 與子音形態縫合）。")
-    return cleaned_notes
+    return cleaned_notes, pitch_np, periodicity_np, rms, db
+
+def align_lyrics_pitch(
+    audio_16k: np.ndarray,
+    pitch_np: np.ndarray,
+    per_np: np.ndarray,
+    rms: np.ndarray,
+    db: np.ndarray,
+    track_stem: str,
+    output_dir: Path,
+    project_root: Path,
+    whisper_model: str = "base",
+    custom_lyrics_path: str = None,
+    phrase_gap: float = 0.45
+):
+    """【方案 A】語音強制對齊 (Forced Alignment) + 最大重疊主導音 (Dominant Pitch) 演算法
+    解決歌唱裝飾音/轉音導致『音符數多於歌詞字數』的問題，實現 1 字 = 1 音高精準方塊
+    """
+    print("\n[方案 A] 正在執行語音強制對齊與字音 1:1 主導音投影演算法 (Forced Alignment + Dominant Pitch)...")
+    import whisper
+    import difflib
+
+    total_dur = len(audio_16k) / 16000.0
+    hop_sec = 0.01
+
+    # 1. 偵測有效歌唱區間 (過濾無人聲的前奏、間奏、尾奏長靜音，杜絕 Whisper 在長靜音中的幻覺)
+    is_singing = db > -45.0
+    diff = np.diff(np.concatenate(([False], is_singing, [False])).astype(int))
+    starts = np.where(diff == 1)[0] * 0.01
+    ends = np.where(diff == -1)[0] * 0.01
+
+    merged = []
+    for s, e in zip(starts, ends):
+        if not merged:
+            merged.append([s, e])
+        else:
+            if s - merged[-1][1] < 1.0:
+                merged[-1][1] = e
+            else:
+                merged.append([s, e])
+
+    sections = [c for c in merged if c[1] - c[0] >= 0.8]
+    print(f"👉 偵測到 {len(sections)} 個有效演唱區間（已自動排除無人聲器樂前奏與間奏）。")
+
+    # 2. 搜尋歌詞文字檔（有歌詞用歌詞，沒歌詞 AI 自動抓）
+    lyrics_file = None
+    if custom_lyrics_path and Path(custom_lyrics_path).exists():
+        lyrics_file = Path(custom_lyrics_path)
+    else:
+        cand1 = project_root / f"{track_stem}.txt"
+        cand2 = output_dir / f"{track_stem}.txt"
+        if cand1.exists():
+            lyrics_file = cand1
+        elif cand2.exists():
+            lyrics_file = cand2
+
+    official_text = ""
+    clean_official_chars = []
+    if lyrics_file:
+        print(f"📄 偵測到官方歌詞檔：{lyrics_file.name}，啟用官方歌詞精準字形轉移模式。")
+        with open(lyrics_file, "r", encoding="utf-8") as f:
+            official_text = f.read()
+        clean_official_chars = [c for c in official_text if c.strip() and c not in '，。！？,.!? …（）()[]【】\n\r\t']
+        print(f"   官方標準歌詞總字數：{len(clean_official_chars)} 字")
+    else:
+        print(f"ℹ️ 未提供歌詞文字檔，啟用 Whisper 全自動 AI 聽寫與字詞時間戳萃取。")
+
+    # 3. 載入 Whisper 模型 (固定在 CPU 執行以相容 DTW float64 運算)
+    print(f"正在載入 Whisper ({whisper_model}) 模型於 CPU 執行 word_timestamps 對齊...")
+    model = whisper.load_model(whisper_model, device="cpu")
+
+    all_timed_chars = []
+    prompt = None
+    if official_text:
+        # 取前 250 字作為解碼引導提示
+        prompt = " ".join([l.strip() for l in official_text.splitlines() if l.strip()])[:250]
+
+    for sec_idx, (sec_s, sec_e) in enumerate(sections):
+        pad_s = max(0.0, sec_s - 0.25)
+        pad_e = min(total_dur, sec_e + 0.25)
+        s_idx = int(pad_s * 16000)
+        e_idx = int(pad_e * 16000)
+        sec_audio = audio_16k[s_idx:e_idx]
+
+        res = model.transcribe(
+            sec_audio,
+            language="zh",
+            word_timestamps=True,
+            initial_prompt=prompt,
+            condition_on_previous_text=False
+        )
+
+        for seg in res.get("segments", []):
+            for w in seg.get("words", []):
+                w_text = w.get("word", "").strip()
+                chars = [c for c in w_text if c.strip() and c not in '，。！？,.!? …（）()[]【】\n\r\t']
+                if not chars:
+                    continue
+                w_start = pad_s + w["start"]
+                w_end = pad_s + w["end"]
+                w_dur = max(0.06, w_end - w_start)
+                c_dur = w_dur / len(chars)
+                for i, c in enumerate(chars):
+                    cs = w_start + i * c_dur
+                    ce = cs + c_dur
+                    all_timed_chars.append({
+                        "char": c,
+                        "start": cs,
+                        "end": ce
+                    })
+
+    if not all_timed_chars:
+        print("[警告] Whisper 未能在人聲中識別出有效字詞時間戳。")
+        return [], []
+
+    # 4. 若有官方歌詞，利用 SequenceMatcher 自動將官方字形轉移至時間戳上（消除諧音錯字）
+    if clean_official_chars:
+        w_chars_str = "".join([item["char"] for item in all_timed_chars])
+        o_chars_str = "".join(clean_official_chars)
+        sm = difflib.SequenceMatcher(None, w_chars_str, o_chars_str)
+
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            w_len = i2 - i1
+            o_len = j2 - j1
+            if tag == "equal":
+                for k in range(w_len):
+                    if j1 + k < len(clean_official_chars):
+                        all_timed_chars[i1 + k]["char"] = clean_official_chars[j1 + k]
+            elif tag == "replace":
+                if w_len == o_len:
+                    for k in range(w_len):
+                        all_timed_chars[i1 + k]["char"] = clean_official_chars[j1 + k]
+                elif 0.5 <= w_len / max(1, o_len) <= 2.0:
+                    for k in range(w_len):
+                        o_idx = min(len(clean_official_chars) - 1, j1 + int(k * o_len / w_len))
+                        all_timed_chars[i1 + k]["char"] = clean_official_chars[o_idx]
+
+    # 5. 主導音投影計算 (Dominant Pitch per Character)
+    min_len = min(len(pitch_np), len(per_np), len(rms))
+    aligned_notes = []
+    global_id = 1
+
+    for item in all_timed_chars:
+        char = item["char"]
+        ts = item["start"]
+        te = item["end"]
+
+        i_s = max(0, int(round(ts / hop_sec)))
+        i_e = min(min_len, int(round(te / hop_sec)))
+        if i_e <= i_s:
+            i_e = min(min_len, i_s + 1)
+
+        p_chunk = pitch_np[i_s:i_e]
+        per_chunk = per_np[i_s:i_e]
+        rms_chunk = rms[i_s:i_e]
+
+        mask = (p_chunk >= 65) & (per_chunk >= 0.15)
+        if not np.any(mask):
+            mask = (p_chunk >= 65)
+
+        if np.any(mask):
+            v_hz = p_chunk[mask]
+            v_per = per_chunk[mask]
+            v_rms = rms_chunk[mask]
+            # 能量與週期性雙加權
+            weights = v_rms * (v_per ** 1.5)
+            midis = np.array([int(round(hz_to_midi(h))) for h in v_hz])
+
+            midi_scores = {}
+            for m_val, w_val in zip(midis, weights):
+                midi_scores[m_val] = midi_scores.get(m_val, 0.0) + float(w_val)
+
+            dom_midi = max(midi_scores.keys(), key=lambda k: midi_scores[k])
+        else:
+            dom_midi = aligned_notes[-1]["midi"] if aligned_notes else 60
+
+        pitch_name = midi_to_note_name(dom_midi)
+        aligned_notes.append({
+            "id": global_id,
+            "char": char,
+            "pitch": pitch_name,
+            "midi": int(dom_midi),
+            "start": round(ts, 3),
+            "end": round(te, 3),
+            "duration": round(te - ts, 3)
+        })
+        global_id += 1
+
+    # 6. 依據聲音物理呼吸停頓 (phrase_gap) 切分樂句分行
+    lines = []
+    if aligned_notes:
+        curr_line = [aligned_notes[0]]
+        for n in aligned_notes[1:]:
+            gap = n["start"] - curr_line[-1]["end"]
+            if gap >= phrase_gap:
+                lines.append(curr_line)
+                curr_line = [n]
+            else:
+                curr_line.append(n)
+        lines.append(curr_line)
+
+    lines_output = []
+    for line_idx, p_notes in enumerate(lines):
+        line_text = "".join([n["char"] for n in p_notes])
+        lines_output.append({
+            "line_idx": line_idx + 1,
+            "text": line_text,
+            "start": p_notes[0]["start"],
+            "end": p_notes[-1]["end"],
+            "duration": round(p_notes[-1]["end"] - p_notes[0]["start"], 3),
+            "note_count": len(p_notes),
+            "notes": p_notes
+        })
+
+    print(f"👉 成功生成 {len(aligned_notes)} 個【1 字 = 1 音高】精準音符方塊，共切分為 {len(lines_output)} 個樂句分行！")
+    return lines_output, aligned_notes
 
 def segment_phrases_by_pause(notes: list, phrase_gap_threshold: float = 0.60):
     """依據聲音物理換氣停頓 (gap >= threshold) 自動將音符切分為歌唱樂句（分行）"""
@@ -347,30 +562,36 @@ def segment_phrases_by_pause(notes: list, phrase_gap_threshold: float = 0.60):
     print(f"👉 依客觀聲音停頓成功切分出 {len(lines_output)} 個樂句分行。")
     return lines_output, flat_notes_list
 
-def print_section_summary(lines_data):
-    print("\n" + "=" * 70)
-    print("   ToneDeaf 依真實聲音換氣自動切分樂句結果（前 10 句預覽）   ")
-    print("=" * 70)
+def print_section_summary(lines_data, title="ToneDeaf 依真實聲音換氣自動切分樂句結果"):
+    print("\n" + "=" * 75)
+    print(f"   {title}（前 10 句預覽）   ")
+    print("=" * 75)
     for line in lines_data[:10]:
         l_idx = line["line_idx"]
         time_str = f"{line['start']:05.2f}s ~ {line['end']:05.2f}s"
         dur_str = f"時長 {line['duration']}s"
         note_count = line["note_count"]
-        print(f"\n【第 {l_idx:2d} 句】[{time_str}] ({dur_str} / {note_count} 個音符):")
+        text_preview = f"【{line['text']}】" if "text" in line and line["text"] else ""
+        print(f"\n【第 {l_idx:2d} 句】{text_preview} [{time_str}] ({dur_str} / {note_count} 個音符):")
 
-        preview_parts = [f"{n['pitch']}({n['duration']}s)" for n in line["notes"]]
+        preview_parts = []
+        for n in line["notes"]:
+            char_tag = f"【{n['char']}】" if "char" in n else ""
+            preview_parts.append(f"{char_tag}{n['pitch']}({n['duration']}s)")
         print("   " + " -> ".join(preview_parts))
 
     if len(lines_data) > 10:
         print(f"\n... 還有 {len(lines_data) - 10} 句，已完整寫入 JSON。")
-    print("=" * 70)
+    print("=" * 75)
 
 def main():
-    parser = argparse.ArgumentParser(description="ToneDeaf - 純聲音音高分析與客觀換氣分句工具（無歌詞依賴）")
-    parser.add_argument("audio", nargs="?", help="音檔名稱或路徑 (如 test.mp3 或 output/test_vocals.wav)")
+    parser = argparse.ArgumentParser(description="ToneDeaf - 智慧人聲音高分析與歌詞字音 1:1 強制對齊系統")
+    parser.add_argument("audio", nargs="?", help="音檔名稱或路徑 (如 cangjie.mp3 或 output/cangjie_vocals.wav)")
     parser.add_argument("--phrase-gap", type=float, default=0.38, help="分句呼吸停頓門檻 (秒)，預設 0.38s")
     parser.add_argument("--energy-db", type=float, default=-38.0, help="RMS 音量能量門檻 (dB)，預設 -38.0dB")
     parser.add_argument("--periodicity", type=float, default=0.38, help="CREPE 週期性信心度門檻，預設 0.38")
+    parser.add_argument("--whisper-model", type=str, default="base", help="Whisper 語音辨識模型 (base 或 small，預設 base)")
+    parser.add_argument("--lyrics", type=str, default=None, help="可選的歌詞文字檔路徑 (預設自動偵測 <track>.txt)")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
@@ -379,7 +600,7 @@ def main():
 
     audio_input = args.audio
     if not audio_input:
-        audio_input = input("請輸入音檔名稱（例如 test.mp3）：").strip()
+        audio_input = input("請輸入音檔名稱（例如 cangjie.mp3）：").strip()
 
     if not audio_input:
         print("未輸入檔案，程式退出。")
@@ -399,7 +620,7 @@ def main():
         sys.exit(1)
 
     try:
-        print(f"\n🎵 開始分析音訊音高：{audio_path.name}")
+        print(f"\n🎵 開始全自動音高與歌詞對齊分析：{audio_path.name}")
 
         # 1. 取得純人聲音檔
         vocals_path = get_vocals_audio(audio_path, output_dir)
@@ -411,8 +632,8 @@ def main():
             audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
         audio_data = audio_data.astype(np.float32)
 
-        # 2. 提取音符序列 (TorchCREPE)
-        all_notes = extract_notes_torchcrepe(
+        # 2. 提取聲學音符序列 (TorchCREPE + 雙門檻動態 VAD + 施密特觸發器)
+        all_notes, pitch_np, per_np, rms, db = extract_notes_torchcrepe(
             audio_data,
             sr=16000,
             periodicity_thresh=args.periodicity,
@@ -422,38 +643,69 @@ def main():
             print("[警告] 未能在人聲中檢測出有效音符。")
             sys.exit(1)
 
-        # 3. 依據聲音物理呼吸停頓自動切分樂句
-        lines_output, flat_notes_list = segment_phrases_by_pause(
+        # 3. 聲學換氣切分 (純聲學音符)
+        lines_acoustic, flat_acoustic_notes = segment_phrases_by_pause(
             all_notes,
             phrase_gap_threshold=args.phrase_gap
         )
 
-        # 4. 輸出 JSON
         track_stem = audio_path.stem.replace("_vocals", "")
         out_json_pitch = output_dir / f"{track_stem}_pitch.json"
-        out_json_legacy = output_dir / f"{track_stem}_lyrics_pitch.json"
+        out_json_lyrics_pitch = output_dir / f"{track_stem}_lyrics_pitch.json"
 
-        payload = {
+        payload_pitch = {
             "track": track_stem,
-            "total_notes": len(flat_notes_list),
-            "total_lines": len(lines_output),
+            "mode": "acoustic_pitch_raw",
+            "total_notes": len(flat_acoustic_notes),
+            "total_lines": len(lines_acoustic),
             "phrase_gap_threshold": args.phrase_gap,
-            "lines": lines_output,
-            "data": flat_notes_list
+            "lines": lines_acoustic,
+            "data": flat_acoustic_notes
         }
 
-        # 同時寫入 _pitch.json 與相容性 _lyrics_pitch.json
         with open(out_json_pitch, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            json.dump(payload_pitch, f, ensure_ascii=False, indent=2)
 
-        with open(out_json_legacy, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        # 4. 【方案 A】語音強制對齊與 1:1 主導音投影 (Forced Alignment + Dominant Pitch)
+        aligned_lines, aligned_notes = align_lyrics_pitch(
+            audio_16k=audio_data,
+            pitch_np=pitch_np,
+            per_np=per_np,
+            rms=rms,
+            db=db,
+            track_stem=track_stem,
+            output_dir=output_dir,
+            project_root=project_root,
+            whisper_model=args.whisper_model,
+            custom_lyrics_path=args.lyrics,
+            phrase_gap=args.phrase_gap
+        )
 
-        print_section_summary(lines_output)
-        print(f"\n🎉 分析完成！純音高與樂句分段資料已寫入：")
-        print(f"👉 {out_json_pitch.resolve()}")
-        print(f"👉 {out_json_legacy.resolve()}\n")
-        print("💡 請在瀏覽器打開 http://localhost:8765 即可檢視按真實呼吸換氣排版的純簡譜旋律！")
+        if aligned_notes:
+            payload_lyrics = {
+                "track": track_stem,
+                "mode": "lyrics_pitch_aligned",
+                "total_notes": len(aligned_notes),
+                "total_lines": len(aligned_lines),
+                "phrase_gap_threshold": args.phrase_gap,
+                "lines": aligned_lines,
+                "data": aligned_notes
+            }
+            with open(out_json_lyrics_pitch, "w", encoding="utf-8") as f:
+                json.dump(payload_lyrics, f, ensure_ascii=False, indent=2)
+
+            print_section_summary(aligned_lines, title="ToneDeaf 方案 A【歌詞字音 1:1 精準對齊】分句旋律預覽")
+        else:
+            print("[資訊] 未產生歌詞對齊資料，相容模式沿用純聲學音符資料。")
+            with open(out_json_lyrics_pitch, "w", encoding="utf-8") as f:
+                json.dump(payload_pitch, f, ensure_ascii=False, indent=2)
+
+        print("\n" + "=" * 75)
+        print(f"🎉 分析大功告成！雙模式資料已完整寫入 output/ 目錄：")
+        print(f"👉 1. 【方案 A 歌詞 1:1 對齊模式】: {out_json_lyrics_pitch.name} ({len(aligned_notes)} 字音符)")
+        print(f"👉 2. 【純物理聲學音高模式】      : {out_json_pitch.name} ({len(flat_acoustic_notes)} 音符塊)")
+        print("=" * 75)
+        print("💡 請在瀏覽器打開 http://localhost:8765 即可檢視！曲目下拉選單已支援雙模式切換！")
 
     except Exception as e:
         print(f"\n[執行失敗] {e}")

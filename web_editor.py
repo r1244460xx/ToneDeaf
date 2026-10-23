@@ -1170,7 +1170,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         tracks.forEach(t => {
           const opt = document.createElement("option");
           opt.value = t;
-          opt.textContent = t;
+          let label = t;
+          if (t.includes("_lyrics_pitch.json")) {
+            label = "🎤 " + t.replace("_lyrics_pitch.json", "") + " (歌詞字音 1:1 對齊模式)";
+          } else if (t.includes("_pitch.json")) {
+            label = "🎼 " + t.replace("_pitch.json", "") + " (純聲學音高模式)";
+          }
+          opt.textContent = label;
           select.appendChild(opt);
         });
 
@@ -1431,7 +1437,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         if (jianpu.dotsBottom > 0) jianpuSymbol = jianpuSymbol + "•";
 
         hudJianpu.textContent = jianpuSymbol;
-        hudNoteName.textContent = activeNote.pitch;
+        hudNoteName.textContent = activeNote.char ? `${activeNote.char} (${activeNote.pitch})` : activeNote.pitch;
         hudNoteMeta.textContent = `時長 ${activeNote.duration}s | MIDI ${activeNote.midi}`;
         document.getElementById("hudPitchBadge").style.borderColor = "#fbbf24";
       } else if (isArticulating && lastEndedNote) {
@@ -1441,13 +1447,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         if (jianpu.dotsBottom > 0) jianpuSymbol = jianpuSymbol + "•";
 
         hudJianpu.textContent = jianpuSymbol;
-        hudNoteName.textContent = lastEndedNote.pitch;
+        hudNoteName.textContent = lastEndedNote.char ? `${lastEndedNote.char} (${lastEndedNote.pitch})` : lastEndedNote.pitch;
         hudNoteMeta.textContent = `咬字連音過渡中 (~${(minNextGap * 1000).toFixed(0)}ms)`;
         document.getElementById("hudPitchBadge").style.borderColor = "#fbbf24";
       } else {
         hudJianpu.textContent = "-";
         if (nextUpcomingNote && minNextGap <= 2.5) {
-          hudNoteName.textContent = "即將開唱 (準備)";
+          const upChar = nextUpcomingNote.char ? `【${nextUpcomingNote.char}】` : "";
+          hudNoteName.textContent = `即將進歌 ${upChar}`;
           hudNoteMeta.textContent = `距離下個音符【${nextUpcomingNote.pitch}】還有 ${minNextGap.toFixed(1)}s`;
         } else {
           hudNoteName.textContent = "☕ 樂句休止中";
@@ -1536,21 +1543,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           let tLabel = tJianpu.number + (tJianpu.acc || "");
           if (tJianpu.dotsTop > 0) tLabel = "•" + tLabel;
           if (tJianpu.dotsBottom > 0) tLabel = tLabel + "•";
-          hudText = `🎯 當前音高：【 ${tLabel} ${activeNote.pitch} 】`;
+          const charTag = activeNote.char ? `【${activeNote.char}】 ` : "";
+          hudText = `🎯 當前字音：${charTag}【 ${tLabel} ${activeNote.pitch} 】`;
           hudIsActive = true;
         } else if (isArticulating && lastEndedNote) {
           const tJianpu = midiToJianpuInfo(lastEndedNote.midi, keyOffset);
           let tLabel = tJianpu.number + (tJianpu.acc || "");
           if (tJianpu.dotsTop > 0) tLabel = "•" + tLabel;
           if (tJianpu.dotsBottom > 0) tLabel = tLabel + "•";
-          hudText = `🎯 咬字連音：【 ${tLabel} ${lastEndedNote.pitch} 】`;
+          const charTag = lastEndedNote.char ? `【${lastEndedNote.char}】 ` : "";
+          hudText = `🎯 咬字連音：${charTag}【 ${tLabel} ${lastEndedNote.pitch} 】`;
           hudIsActive = true;
         } else if (nextUpcomingNote && minNextGap <= 2.5) {
           const tJianpu = midiToJianpuInfo(nextUpcomingNote.midi, keyOffset);
           let tLabel = tJianpu.number + (tJianpu.acc || "");
           if (tJianpu.dotsTop > 0) tLabel = "•" + tLabel;
           if (tJianpu.dotsBottom > 0) tLabel = tLabel + "•";
-          hudText = `⏳ 準備進歌：【 ${tLabel} ${nextUpcomingNote.pitch} 】 (${minNextGap.toFixed(1)}s)`;
+          const charTag = nextUpcomingNote.char ? `【${nextUpcomingNote.char}】 ` : "";
+          hudText = `⏳ 準備進歌：${charTag}【 ${tLabel} ${nextUpcomingNote.pitch} 】 (${minNextGap.toFixed(1)}s)`;
           hudIsUpcoming = true;
         } else {
           // 純休止或間奏中：明確標註休止，絕不顯示假音高！
@@ -1652,17 +1662,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           if (jianpu.dotsTop > 0) label = "•" + label;
           if (jianpu.dotsBottom > 0) label = label + "•";
 
-          // 強制所有音符條均拼出 "簡譜 + 英文代號"，例如 "5̇ G4"、"1 C4"
-          const fullLabelText = `${label} ${n.pitch}`;
+          // 若存在歌詞漢字，顯示「字 + 簡譜 + 音名」，例如 "多 5, G3"、"遙 2 D4"、"遠 3 E4"
+          const fullLabelText = n.char ? `${n.char}  ${label} ${n.pitch}` : `${label} ${n.pitch}`;
 
-          const fontSize = Math.max(12, Math.min(h * 0.72, 18));
+          const fontSize = Math.max(12, Math.min(h * (n.char ? 0.74 : 0.72), 18));
           rollCtx.font = `900 ${fontSize}px "Courier New", system-ui, sans-serif`;
 
           const textMetrics = rollCtx.measureText(fullLabelText);
           const textW = textMetrics.width;
 
           // 膠囊底框寬度自適應 (即使音符短，底標也不會截斷文字)
-          const badgeW = Math.max(w - 2, textW + 10);
+          const badgeW = Math.max(w - 2, textW + (n.char ? 14 : 10));
           const badgeH = Math.max(h - 4, 18);
           const badgeX = x + (w - badgeW) / 2;
           const badgeY = y + (h - badgeH) / 2;
@@ -1950,11 +1960,12 @@ class ToneDeafHandler(SimpleHTTPRequestHandler):
 
             elif path == "/api/tracks":
                 files = set()
-                for p in OUTPUT_DIR.glob("*_pitch.json"):
-                    files.add(p.name)
                 for p in OUTPUT_DIR.glob("*_lyrics_pitch.json"):
                     files.add(p.name)
-                json_files = sorted(list(files))
+                for p in OUTPUT_DIR.glob("*_pitch.json"):
+                    files.add(p.name)
+                # 優先將【歌詞 1:1 對齊模式】排在最前供預設載入
+                json_files = sorted(list(files), key=lambda x: (0 if "lyrics_pitch" in x else 1, x))
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
