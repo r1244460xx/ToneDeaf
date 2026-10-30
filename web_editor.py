@@ -605,7 +605,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <label for="audioSourceSelect">聲道：</label>
         <select id="audioSourceSelect" onchange="changeAudioSource(this.value)">
           <option value="vocals" selected>🎤 純人聲 (超清晰)</option>
-          <option value="original">🎵 完整原曲 (伴奏)</option>
+          <option value="accompaniment">🎹 純伴奏 (KTV 練唱模式)</option>
+          <option value="original">🎵 完整原曲 (原音混音)</option>
         </select>
       </div>
 
@@ -912,6 +913,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       if (type === "vocals") {
         audio.src = "/audio/" + currentData.track + "_vocals.wav";
+      } else if (type === "accompaniment") {
+        audio.src = "/audio/" + currentData.track + "_accompaniment.wav";
       } else {
         audio.src = "/audio/" + currentData.track + ".mp3";
       }
@@ -1222,6 +1225,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const srcType = document.getElementById("audioSourceSelect").value;
         if (srcType === "vocals") {
           audio.src = "/audio/" + json.track + "_vocals.wav";
+        } else if (srcType === "accompaniment") {
+          audio.src = "/audio/" + json.track + "_accompaniment.wav";
         } else {
           audio.src = "/audio/" + json.track + ".mp3";
         }

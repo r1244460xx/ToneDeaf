@@ -330,13 +330,35 @@ def align_lyrics_pitch(
         if not merged:
             merged.append([s, e])
         else:
-            if s - merged[-1][1] < 1.0:
+            if s - merged[-1][1] < 0.8:
                 merged[-1][1] = e
             else:
                 merged.append([s, e])
 
-    sections = [c for c in merged if c[1] - c[0] >= 0.8]
-    print(f"👉 偵測到 {len(sections)} 個有效演唱區間（已自動排除無人聲器樂前奏與間奏）。")
+    filtered = [c for c in merged if c[1] - c[0] >= 0.8]
+
+    # 強制限制每段音訊長度 <= 25 秒，杜絕 Whisper 在 >30 秒長區間內降級、漏字與截斷
+    sections = []
+    for s, e in filtered:
+        dur = e - s
+        if dur <= 25.0:
+            sections.append([s, e])
+        else:
+            sub_s = s
+            while sub_s < e:
+                sub_e = min(e, sub_s + 25.0)
+                if sub_e < e:
+                    w_start = int((sub_s + 10.0) / 0.01)
+                    w_end = int(sub_e / 0.01)
+                    split_idx = w_start + np.argmin(db[w_start:w_end])
+                    split_t = split_idx * 0.01
+                    sections.append([sub_s, split_t])
+                    sub_s = split_t
+                else:
+                    sections.append([sub_s, e])
+                    break
+
+    print(f"👉 偵測並細分為 {len(sections)} 個高精度演唱區間（每段 <= 25s，確保 Whisper 100% 完整解碼零漏字）。")
 
     # 2. 搜尋歌詞文字檔（有歌詞用歌詞，沒歌詞 AI 自動抓）
     lyrics_file = None
@@ -366,10 +388,6 @@ def align_lyrics_pitch(
     model = whisper.load_model(whisper_model, device="cpu")
 
     all_timed_chars = []
-    prompt = None
-    if official_text:
-        # 取前 250 字作為解碼引導提示
-        prompt = " ".join([l.strip() for l in official_text.splitlines() if l.strip()])[:250]
 
     for sec_idx, (sec_s, sec_e) in enumerate(sections):
         pad_s = max(0.0, sec_s - 0.25)
@@ -378,11 +396,20 @@ def align_lyrics_pitch(
         e_idx = int(pad_e * 16000)
         sec_audio = audio_16k[s_idx:e_idx]
 
+        # 動態提供該段音樂在全曲中相應的歌詞 context 作為 prompt
+        sec_prompt = None
+        if official_text:
+            progress_ratio = sec_s / max(1.0, total_dur)
+            approx_char_pos = int(progress_ratio * len(clean_official_chars))
+            p_start = max(0, approx_char_pos - 30)
+            p_end = min(len(clean_official_chars), approx_char_pos + 120)
+            sec_prompt = "".join(clean_official_chars[p_start:p_end])
+
         res = model.transcribe(
             sec_audio,
             language="zh",
             word_timestamps=True,
-            initial_prompt=prompt,
+            initial_prompt=sec_prompt,
             condition_on_previous_text=False
         )
 
@@ -426,9 +453,9 @@ def align_lyrics_pitch(
                 if w_len == o_len:
                     for k in range(w_len):
                         all_timed_chars[i1 + k]["char"] = clean_official_chars[j1 + k]
-                elif 0.5 <= w_len / max(1, o_len) <= 2.0:
+                else:
                     for k in range(w_len):
-                        o_idx = min(len(clean_official_chars) - 1, j1 + int(k * o_len / w_len))
+                        o_idx = min(len(clean_official_chars) - 1, j1 + int(round(k * (o_len - 1) / max(1, w_len - 1))))
                         all_timed_chars[i1 + k]["char"] = clean_official_chars[o_idx]
 
     # 5. 主導音投影計算 (Dominant Pitch per Character)

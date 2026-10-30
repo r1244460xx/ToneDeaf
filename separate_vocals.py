@@ -66,9 +66,10 @@ def separate_vocals(audio_input: str, output_dir: str = "output"):
         print(f"\n[錯誤] 發生未預期的例外：{e}")
         return False
 
-    # Demucs 預設會輸出到: temp_demucs_dir / htdemucs / <track_name> / vocals.wav
+    # Demucs 預設會輸出到: temp_demucs_dir / htdemucs / <track_name> / [vocals.wav, no_vocals.wav]
     track_stem_name = audio_path.stem
     demucs_vocals_file = temp_demucs_dir / "htdemucs" / track_stem_name / "vocals.wav"
+    demucs_no_vocals_file = temp_demucs_dir / "htdemucs" / track_stem_name / "no_vocals.wav"
 
     if not demucs_vocals_file.exists():
         # 有些情況檔名包含特殊字元，嘗試搜尋 temp 目錄下的 vocals.wav
@@ -79,9 +80,23 @@ def separate_vocals(audio_input: str, output_dir: str = "output"):
             print(f"\n[錯誤] 未能找到分離出的 vocals.wav 檔案。")
             return False
 
+    if not demucs_no_vocals_file.exists():
+        found_no_vocals = list(temp_demucs_dir.glob("**/no_vocals.wav"))
+        if found_no_vocals:
+            demucs_no_vocals_file = found_no_vocals[0]
+
     # 將提取出的人聲移動/複製到 output_dir，以乾淨易讀的檔名呈現
     final_output_file = out_path / f"{track_stem_name}_vocals.wav"
     shutil.copy2(demucs_vocals_file, final_output_file)
+
+    # 同步將伴奏（去除人聲後的純音樂軌）儲存為獨立音檔
+    final_accompaniment_file = out_path / f"{track_stem_name}_accompaniment.wav"
+    final_instrumental_file = out_path / f"{track_stem_name}_instrumental.wav"
+    has_accompaniment = False
+    if demucs_no_vocals_file.exists():
+        shutil.copy2(demucs_no_vocals_file, final_accompaniment_file)
+        shutil.copy2(demucs_no_vocals_file, final_instrumental_file)
+        has_accompaniment = True
 
     # 清理臨時檔案
     try:
@@ -89,9 +104,13 @@ def separate_vocals(audio_input: str, output_dir: str = "output"):
     except Exception:
         pass
 
-    print(f"\n=== 人聲分離完成！ ===")
-    print(f"純人聲音檔已儲存至：")
+    print(f"\n=== 音軌分離完成！ ===")
+    print(f"🎤 純人聲音檔已儲存至：")
     print(f"👉 {final_output_file.resolve()}")
+    if has_accompaniment:
+        print(f"🎹 純伴奏音檔（去人聲背景音樂）已儲存至：")
+        print(f"👉 {final_accompaniment_file.resolve()}")
+        print(f"👉 {final_instrumental_file.resolve()}")
     return True
 
 def main():
